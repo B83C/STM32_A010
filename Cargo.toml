@@ -1,0 +1,13 @@
+[package]
+name = "a010"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+anyhow = "1.0.86"
+enterpolation = "0.2.1"
+minifb = "0.27.0"
+palette = "0.7.6"
+rand = "0.8.5"
+serialport = "4.4.0"
+zerocopy = { version = "0.7.34", features = ["derive"] }
