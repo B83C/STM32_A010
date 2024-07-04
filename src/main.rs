@@ -74,7 +74,7 @@ fn main() -> Result<()> {
         .open("training_data.bin")
         .unwrap();
 
-    let mut bufwriter = BufWriter::new(file);
+    let mut bufwriter = BufWriter::with_capacity(20480, file);
 
     let target = serialport::available_ports()
         .expect("Unable to find any available ports")
@@ -158,9 +158,17 @@ fn main() -> Result<()> {
                         bufwriter.write(&buf[20..(20 + (HEIGHT * WIDTH))]).ok();
                     }
                 } else if *key == Key::Backspace {
-                    bufwriter.seek_relative(-((1 + WIDTH * HEIGHT) as i64)).ok();
                     // dbg!(bufwriter.buffer());
-                    println!("Deleted last label");
+                    if bufwriter
+                        .seek_relative(-((1 + WIDTH * HEIGHT) as i64))
+                        .ok()
+                        .is_some()
+                    {
+                        println!("Deleted last label");
+                    } else {
+                        println!("Unable to delete last label");
+                    }
+                    // dbg!(bufwriter.buffer());
                 }
             }
             for (i, pixel) in buf[20..].iter().take(WIDTH * HEIGHT).enumerate() {
