@@ -5,7 +5,7 @@ use enterpolation::{linear::ConstEquidistantLinear, Curve};
 use minifb::{Key, Window, WindowOptions};
 use palette::{IntoColor, LinSrgb, Srgb};
 use serialport::SerialPort;
-use std::io::{IoSliceMut, Read};
+use std::io::{BufWriter, IoSliceMut, Read, Seek, SeekFrom, Write};
 use std::result::Result::Ok;
 use std::thread::sleep;
 use std::time::Duration;
@@ -19,7 +19,15 @@ const FRAME_END_FLAG: u8 = 0xDD;
 
 const FRAME_HEAD_SIZE: usize = 20;
 
+use rkyv::{Archive, Deserialize, Serialize};
 use zerocopy::{FromBytes, FromZeroes};
+
+#[derive(Archive, Serialize, Deserialize)]
+#[repr(C)]
+struct Data<'a> {
+    label: u8,
+    pixels: &'a [u8],
+}
 
 #[derive(FromZeroes, FromBytes, Debug)]
 #[repr(C)]
@@ -40,27 +48,49 @@ struct FrameHead {
     reserved3: u8, // fixed to 0xff
 }
 
-fn draw_circle(
-    buffer: &mut [u32],
-    width: usize,
-    height: usize,
-    cx: usize,
-    cy: usize,
-    radius: usize,
-    color: u32,
-) {
-    for y in 0..height {
-        for x in 0..width {
-            let dx = x as isize - cx as isize;
-            let dy = y as isize - cy as isize;
-            if dx * dx + dy * dy <= (radius * radius) as isize {
-                buffer[y * width + x] = color;
-            }
-        }
-    }
-}
+// fn draw_circle(
+//     buffer: &mut [u32],
+//     width: usize,
+//     height: usize,
+//     cx: usize,
+//     cy: usize,
+//     radius: usize,
+//     color: u32,
+// ) {
+//     for y in 0..height {
+//         for x in 0..width {
+//             let dx = x as isize - cx as isize;
+//             let dy = y as isize - cy as isize;
+//             if dx * dx + dy * dy <= (radius * radius) as isize {
+//                 buffer[y * width + x] = color;
+//             }
+//         }
+//     }
+// }
 fn main() -> Result<()> {
-    let mut port = serialport::new("/dev/ttyUSB1", 115_200)
+    let file = std::fs::OpenOptions::new()
+        .append(true)
+        .create(true)
+        .open("training_data.bin")
+        .unwrap();
+
+    let mut bufwriter = BufWriter::new(file);
+
+    let target = serialport::available_ports()
+        .expect("Unable to find any available ports")
+        .into_iter()
+        .find(|c| {
+            if let serialport::SerialPortType::UsbPort(ref upi) = c.port_type
+                && let Some(ref s) = upi.product
+            {
+                s.to_lowercase() == "SIPEED Meta Sense Lite".to_lowercase()
+            } else {
+                false
+            }
+        })
+        .expect("Unable to find SIPEED Meta Sense Lite");
+
+    let mut port = serialport::new(target.port_name, 115_200)
         .timeout(Duration::from_millis(10))
         .open()
         .expect("Failed to open port");
@@ -73,15 +103,15 @@ fn main() -> Result<()> {
     sleep(Duration::from_millis(20));
     port.write(b"AT+ANTIMMI=-1\r").ok();
     sleep(Duration::from_millis(20));
-    port.write(b"AT+BAUD=3000000\r").ok();
-    sleep(Duration::from_millis(20));
+    // port.write(b"AT+BAUD=3000000\r").ok();
+    // sleep(Duration::from_millis(20));
 
-    let width = 100;
-    let height = 100;
+    const WIDTH: usize = 100;
+    const HEIGHT: usize = 100;
     let mut window = Window::new(
         "Depth Image",
-        width,
-        height,
+        WIDTH,
+        HEIGHT,
         WindowOptions {
             scale: minifb::Scale::X4,
             ..Default::default()
@@ -91,7 +121,7 @@ fn main() -> Result<()> {
         panic!("{}", e);
     });
     let mut buf = [0u8; 10022];
-    let mut output = [0u32; 100 * 100];
+    let mut output = [0u32; HEIGHT * WIDTH];
     let gradient = ConstEquidistantLinear::<f32, _, _>::equidistant_unchecked([
         LinSrgb::new(0.5, 0.0, 0.0),
         LinSrgb::new(1.0, 0.0, 0.0),
@@ -102,11 +132,11 @@ fn main() -> Result<()> {
         LinSrgb::new(0.0, 0.0, 0.3),
     ]);
     let gradient: Vec<LinSrgb> = gradient.take(256).collect();
-    let mut rng = rand::thread_rng();
-    const RG: std::ops::Range<usize> = 3..97;
-    let mut cp = (rng.gen_range(RG), rng.gen_range(RG));
-    let mut count = 1;
-    let mut count1 = 0;
+    // let mut rng = rand::thread_rng();
+    // const RG: std::ops::Range<usize> = 3..97;
+    // let mut cp = (rng.gen_range(RG), rng.gen_range(RG));
+    // let mut count = 1;
+    // let mut count1 = 0;
     window.set_target_fps(60);
     while window.is_open() && !window.is_key_down(Key::Escape) {
         port.read_exact(&mut buf).ok();
@@ -114,25 +144,27 @@ fn main() -> Result<()> {
             && header.frame_begin_flag == 0xff00
             && buf.ends_with(&[0xDD])
         {
-            let c = window.is_key_pressed(Key::C, minifb::KeyRepeat::No);
-            let n = window.is_key_pressed(Key::N, minifb::KeyRepeat::No);
-            if n {
-                println!("count: {count} count1: {count1}");
-                // let filename = format!("training_data/depth_image_{}", cp.0, cp.1);
-                std::fs::write(
-                    format!("training_data/d_{}_{}", count, count1),
-                    &buf[20..(20 + 10000)],
-                )
-                .ok();
-                count1 = count1 + 1;
-                // cp = (rng.gen_range(RG), rng.gen_range(RG));
+            // println!("Frame id : {}", header.frame_id);
+            if let Some(key) = window.get_keys_pressed(minifb::KeyRepeat::No).first() {
+                if (*key as u8) <= 35 {
+                    if window.is_key_down(Key::LeftAlt) {
+                        if (*key as u8) < 10 {
+                            port.write(format!("AT+UNIT={}\r", *key as u8 + 1).as_bytes())
+                                .ok();
+                        }
+                    } else {
+                        println!("Saved label {:#?}", key);
+                        bufwriter.write(&[*key as u8]).ok();
+                        bufwriter.write(&buf[20..(20 + (HEIGHT * WIDTH))]).ok();
+                    }
+                } else if *key == Key::Backspace {
+                    bufwriter.seek_relative(-((1 + WIDTH * HEIGHT) as i64)).ok();
+                    // dbg!(bufwriter.buffer());
+                    println!("Deleted last label");
+                }
             }
-            if c {
-                count = count + 1;
-                count1 = 0;
-            }
-            for (i, pixel) in buf[20..].iter().take(width * height).enumerate() {
-                let intensity = 255 - *pixel as usize;
+            for (i, pixel) in buf[20..].iter().take(WIDTH * HEIGHT).enumerate() {
+                let intensity = *pixel as usize;
                 let color = gradient[intensity].into_format::<u8>();
                 output[i] =
                     (color.red as u32) << 16 | (color.green as u32) << 8 | color.blue as u32;
@@ -141,18 +173,21 @@ fn main() -> Result<()> {
             // draw_circle(&mut output, 100, 100, cp.0, cp.1, 3, 0xFFFFFF);
 
             // window.get_mouse_pos(minifb::MouseMode::Clamp).map(|mouse| {
-                // println!(
-                //     "x {} y {} value: {}",
-                //     mouse.0,
-                //     mouse.1,
-                //     255 - buf[(mouse.1 as usize * 100) + mouse.0 as usize + 22]
-                // );
-            }); // window.draw_circle(cp.0 as i32, cp.1 as i32, 10, 0xFF0000);
-            window.update_with_buffer(&output, width, height).unwrap();
+            // println!(
+            //     "x {} y {} value: {}",
+            //     mouse.0,
+            //     mouse.1,
+            //     255 - buf[(mouse.1 as usize * 100) + mouse.0 as usize + 22]
+            // );
+            // }); // window.draw_circle(cp.0 as i32, cp.1 as i32, 10, 0xFF0000);
+            window.update_with_buffer(&output, WIDTH, HEIGHT).unwrap();
             // dbg!(&buf[10015]);
             // dbg!(header);
         }
+        sleep(Duration::from_millis(16));
     }
+
+    bufwriter.flush().ok();
 
     Ok(())
 }
