@@ -57,10 +57,13 @@ class CNNModel(nn.Module):
         self.fc2 = nn.Linear(128, 7)  # Output layer for 7 classes
 
     def forward(self, x):
-        x = self.pool(torch.relu(self.conv1(x)))
-        x = self.pool(torch.relu(self.conv2(x)))
-        x = self.pool(torch.relu(self.conv3(x)))
-        x = x.view(-1, 128 * 12 * 12)
+        x = torch.relu(self.conv1(x))
+        x = torch.max_pool2d(x, 2)
+        x = torch.relu(self.conv2(x))
+        x = torch.max_pool2d(x, 2)
+        x = torch.relu(self.conv3(x))
+        x = torch.max_pool2d(x, 2)
+        x = x.view(x.size(0), -1)  # Flatten the tensor
         x = torch.relu(self.fc1(x))
         x = self.fc2(x)
         return x
