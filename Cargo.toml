@@ -11,4 +11,5 @@ palette = "0.7.6"
 rand = "0.8.5"
 rkyv = "0.7.44"
 serialport = "4.4.0"
+tch = { git = "https://github.com/LaurentMazare/tch-rs", version = "0.16.0" }
 zerocopy = { version = "0.7.34", features = ["derive"] }

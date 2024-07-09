@@ -10,6 +10,7 @@ use std::result::Result::Ok;
 use std::thread::sleep;
 use std::time::Duration;
 use std::{default, str};
+use tch::{nn, nn::Module, nn::OptimizerConfig, Device, Tensor, vision};
 
 use rand::Rng;
 // use winit_input_helper::WinitInputHelper;
@@ -68,6 +69,12 @@ struct FrameHead {
 //     }
 // }
 fn main() -> Result<()> {
+
+    let device = Device::cuda_if_available();
+
+    // Load the model
+    let model = tch::CModule::load("hand_gesture_cnn_model.pt")?;
+
     let file = std::fs::OpenOptions::new()
         .append(true)
         .create(true)
@@ -76,34 +83,45 @@ fn main() -> Result<()> {
 
     let mut bufwriter = BufWriter::with_capacity(20480, file);
 
-    let target = serialport::available_ports()
-        .expect("Unable to find any available ports")
-        .into_iter()
-        .find(|c| {
-            if let serialport::SerialPortType::UsbPort(ref upi) = c.port_type
-                && let Some(ref s) = upi.product
-            {
-                s.to_lowercase() == "SIPEED Meta Sense Lite".to_lowercase()
-            } else {
-                false
-            }
-        })
-        .expect("Unable to find SIPEED Meta Sense Lite");
+    let target = if let Some(port) = std::env::args().skip(1).next() {
+        port
+    } else {
+        serialport::available_ports()
+            .expect("Unable to find any available ports")
+            .into_iter()
+            .find(|c| {
+                if let serialport::SerialPortType::UsbPort(ref upi) = c.port_type
+                    && let Some(ref s) = upi.product
+                {
+                    s.to_lowercase() == "SIPEED Meta Sense Lite".to_lowercase()
+                } else {
+                    false
+                }
+            })
+            .expect("Unable to find SIPEED Meta Sense Lite")
+            .port_name
+    };
 
-    let mut port = serialport::new(target.port_name, 115_200)
+    let mut port = serialport::new(target, 115200)
         .timeout(Duration::from_millis(10))
         .open()
         .expect("Failed to open port");
+    // let mut port = serialport::new(target.port_name, 115_200)
+    //     .timeout(Duration::from_millis(10))
+    //     .open()
+    //     .expect("Failed to open port");
 
-    port.write(b"AT+DISP=2\r").ok();
+    port.write(b"AT+DISP=2\r").ok(); // 4 for uart directly, 2 for usb
     sleep(Duration::from_millis(20));
     port.write(b"AT+FPS=19\r").ok();
     sleep(Duration::from_millis(20));
-    port.write(b"AT+UNIT=3\r").ok();
+    port.write(b"AT+UNIT=1\r").ok();
     sleep(Duration::from_millis(20));
     port.write(b"AT+ANTIMMI=-1\r").ok();
     sleep(Duration::from_millis(20));
     // port.write(b"AT+BAUD=3000000\r").ok();
+    // sleep(Duration::from_millis(20));
+    // port.write(b"AT+Save\r").ok();
     // sleep(Duration::from_millis(20));
 
     const WIDTH: usize = 100;
@@ -121,6 +139,7 @@ fn main() -> Result<()> {
         panic!("{}", e);
     });
     let mut buf = [0u8; 10022];
+    // let mut index = 0;
     let mut output = [0u32; HEIGHT * WIDTH];
     let gradient = ConstEquidistantLinear::<f32, _, _>::equidistant_unchecked([
         LinSrgb::new(0.5, 0.0, 0.0),
@@ -139,12 +158,24 @@ fn main() -> Result<()> {
     // let mut count1 = 0;
     window.set_target_fps(60);
     while window.is_open() && !window.is_key_down(Key::Escape) {
+        // index = (index + 1) & 0b1;
         port.read_exact(&mut buf).ok();
         if let Some(header) = FrameHead::ref_from_prefix(&buf)
             && header.frame_begin_flag == 0xff00
-            && buf.ends_with(&[0xDD])
+        // && buf.iter().take(buf.len() - 2).sum::<u8>() == buf[buf.len() - 2] // To verify the received buffer
+        // && buf.ends_with(&[0xDD])
         {
-            // println!("Frame id : {}", header.frame_id);
+            
+            let input = (Tensor::from_slice(&buf[20..(20 + (HEIGHT * WIDTH))])
+            .to_kind(tch::Kind::Float) / 255.0 )           // Convert to float
+            
+            .reshape(&[1, 1, 100, 100])     // Add batch and channel dimensions
+            .to(device);    
+            // let input = Tensor::from_data_size(&buf[20..(20 + (HEIGHT * WIDTH))], &[1, 1, 100, 100], tch::Kind::Uint8);;
+            let out = model.forward_ts(&[input])?;
+            let max_index = out.argmax(1, false).int64_value(&[0]);
+            println!("{}", max_index);
+            println!("Frame id : {}", header.frame_id);
             if let Some(key) = window.get_keys_pressed(minifb::KeyRepeat::No).first() {
                 if (*key as u8) <= 35 {
                     if window.is_key_down(Key::LeftAlt) {
@@ -192,7 +223,7 @@ fn main() -> Result<()> {
             // dbg!(&buf[10015]);
             // dbg!(header);
         }
-        sleep(Duration::from_millis(16));
+        // sleep(Duration::from_millis(8));
     }
 
     bufwriter.flush().ok();
